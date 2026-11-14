@@ -1,8 +1,10 @@
 import { expect } from "chai";
 import { BasicTests } from "../../../test/helper/Basic.js";
+import { TestAudioBuffer } from "../../../test/helper/compare/index.js";
 import { CompareToFile } from "../../../test/helper/CompareToFile.js";
 import { atTime, Offline, whenBetween } from "../../../test/helper/Offline.js";
 import { SourceTests } from "../../../test/helper/SourceTests.js";
+import { Merge } from "../../component/channel/Merge.js";
 import { ToneAudioBuffer } from "../../core/context/ToneAudioBuffer.js";
 import { getContext } from "../../core/Global.js";
 import { Player } from "./Player.js";
@@ -733,6 +735,132 @@ describe("Player", () => {
 					}, 250);
 				},
 				url: "./test/audio/sine.wav",
+			});
+		});
+	});
+
+	context("Switching buffers", () => {
+		/**
+		 * Make a 0.4 second buffer filled with a constant value
+		 */
+		function makeFlatBuffer(value: number): ToneAudioBuffer {
+			const samples = new Float32Array(
+				Math.floor(getContext().sampleRate * 0.4)
+			);
+			samples.fill(value);
+			return ToneAudioBuffer.fromArray(samples);
+		}
+
+		/**
+		 * Return the peak (max absolute) sample value of the given
+		 * channel between two times
+		 */
+		function getPeakBetween(
+			buff: TestAudioBuffer,
+			start: number,
+			stop: number,
+			channel = 0
+		): number {
+			const data = buff.toArray()[channel];
+			const startSample = Math.floor(start * buff.sampleRate);
+			const stopSample = Math.min(
+				Math.floor(stop * buff.sampleRate),
+				data.length
+			);
+			let peak = 0;
+			for (let i = startSample; i < stopSample; i++) {
+				peak = Math.max(peak, Math.abs(data[i]));
+			}
+			return peak;
+		}
+
+		it("two players sharing one loaded buffer both play it when nothing is switched", () => {
+			return Offline(
+				() => {
+					const shared = makeFlatBuffer(0.8);
+					const merge = new Merge(2).toDestination();
+					const player1 = new Player({
+						fadeIn: 0,
+						fadeOut: 0,
+						loop: true,
+						url: shared,
+					});
+					const player2 = new Player({
+						fadeIn: 0,
+						fadeOut: 0,
+						loop: true,
+						url: shared,
+					});
+					player1.connect(merge, 0, 0);
+					player2.connect(merge, 0, 1);
+					player1.start(0);
+					player2.start(0);
+				},
+				0.5,
+				2
+			).then((buff) => {
+				[0, 1].forEach((channel) => {
+					expect(
+						getPeakBetween(buff, 0.05, 0.15, channel),
+						`channel ${channel} peak between 0.05-0.15`
+					).to.be.within(0.75, 0.85);
+					expect(
+						getPeakBetween(buff, 0.32, 0.45, channel),
+						`channel ${channel} peak between 0.32-0.45`
+					).to.be.within(0.75, 0.85);
+				});
+			});
+		});
+
+		it("switching one player's buffer does not affect the other player sharing the same buffer", () => {
+			return Offline(
+				() => {
+					const shared = makeFlatBuffer(0.8);
+					const replacement = makeFlatBuffer(0.25);
+					const merge = new Merge(2).toDestination();
+					const player1 = new Player({
+						fadeIn: 0,
+						fadeOut: 0,
+						loop: true,
+						url: shared,
+					});
+					const player2 = new Player({
+						fadeIn: 0,
+						fadeOut: 0,
+						loop: true,
+						url: shared,
+					});
+					player1.connect(merge, 0, 0);
+					player2.connect(merge, 0, 1);
+					player1.start(0);
+					player2.start(0);
+					// at 0.2 switch only the first player to the second buffer
+					return atTime(0.2, () => {
+						player1.buffer = replacement;
+					});
+				},
+				0.5,
+				2
+			).then((buff) => {
+				// before the switch both players play the first buffer
+				expect(getPeakBetween(buff, 0.05, 0.15, 0)).to.be.within(
+					0.75,
+					0.85
+				);
+				expect(getPeakBetween(buff, 0.05, 0.15, 1)).to.be.within(
+					0.75,
+					0.85
+				);
+				// after the switch the first player plays the second buffer
+				expect(getPeakBetween(buff, 0.32, 0.45, 0)).to.be.within(
+					0.2,
+					0.3
+				);
+				// while the second player still plays the first buffer
+				expect(getPeakBetween(buff, 0.32, 0.45, 1)).to.be.within(
+					0.75,
+					0.85
+				);
 			});
 		});
 	});

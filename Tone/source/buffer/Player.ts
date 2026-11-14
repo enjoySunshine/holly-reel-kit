@@ -359,13 +359,29 @@ export class Player extends Source<PlayerOptions> {
 	}
 
 	/**
-	 * The audio buffer belonging to the player.
+	 * The audio buffer belonging to the player. Setting the buffer while the
+	 * player is playing swaps the currently sounding audio over to the new
+	 * buffer immediately, continuing from the current playback position.
 	 */
 	get buffer(): ToneAudioBuffer {
 		return this._buffer;
 	}
 	set buffer(buffer) {
 		this._buffer.set(buffer);
+		// if the player is currently playing, restart all of the active
+		// sources with the new buffer at their current playback position
+		// so that the new buffer takes effect immediately
+		if (this._state.getValueAtTime(this.now()) === "started") {
+			const now = this.now();
+			// stop all of the current sources and compute their positions
+			const positions = [...this._activeSources].map((source) => {
+				const position = source.getPlaybackPositionAtTime(now);
+				source.stop(now);
+				return position;
+			});
+			// start new sources playing the new buffer from the same positions
+			positions.forEach((position) => this._start(now, position));
+		}
 	}
 
 	/**

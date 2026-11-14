@@ -35,7 +35,7 @@ export class GrainPlayer extends Source<GrainPlayerOptions> {
 	/**
 	 * The audio buffer belonging to the player.
 	 */
-	buffer: ToneAudioBuffer;
+	private _buffer!: ToneAudioBuffer;
 
 	/**
 	 * Create a repeating tick to schedule the grains.
@@ -211,6 +211,25 @@ export class GrainPlayer extends Source<GrainPlayerOptions> {
 		const fadeIn = offset < this._overlap ? 0 : this._overlap;
 
 		// create a buffer source
+		this._createGrain(
+			time,
+			offset,
+			fadeIn,
+			time + this._grainSize / this.playbackRate
+		);
+	}
+
+	/**
+	 * Create and schedule a single grain which plays the current buffer
+	 * starting at the given time and offset and stopping at the given stop time.
+	 */
+	private _createGrain(
+		time: Seconds,
+		offset: Seconds,
+		fadeIn: Time,
+		stopTime: Seconds
+	): void {
+		// create a buffer source
 		const source = new ToneBufferSource({
 			context: this.context,
 			url: this.buffer,
@@ -223,8 +242,8 @@ export class GrainPlayer extends Source<GrainPlayerOptions> {
 			playbackRate: intervalToFrequencyRatio(this.detune / 100),
 		}).connect(this.output);
 
-		source.start(time, this._grainSize * ticks);
-		source.stop(time + this._grainSize / this.playbackRate);
+		source.start(time, offset);
+		source.stop(stopTime);
 
 		// add it to the active sources
 		this._activeSources.push(source);
@@ -235,6 +254,34 @@ export class GrainPlayer extends Source<GrainPlayerOptions> {
 				this._activeSources.splice(index, 1);
 			}
 		};
+	}
+
+	/**
+	 * The audio buffer belonging to the player. Setting the buffer while the
+	 * player is playing swaps the currently sounding grains over to the new
+	 * buffer immediately, even in the middle of a grain.
+	 */
+	get buffer(): ToneAudioBuffer {
+		return this._buffer;
+	}
+	set buffer(buffer: ToneAudioBuffer) {
+		this._buffer = buffer;
+		// swap the buffer of all of the currently playing grains so that the
+		// new buffer takes effect immediately, even in the middle of a grain
+		const now = this.now();
+		[...this._activeSources].forEach((source) => {
+			const position = source.getPlaybackPositionAtTime(now);
+			// compute when the grain was scheduled to stop playing
+			const stopTime =
+				source.stopTime > now
+					? source.stopTime - this.toSeconds(source.fadeOut)
+					: now + this._grainSize / this._playbackRate;
+			// stop the current grain
+			source.fadeOut = 0;
+			source.stop(now);
+			// start a new grain with the new buffer at the same position
+			this._createGrain(now, position, 0, stopTime);
+		});
 	}
 
 	/**

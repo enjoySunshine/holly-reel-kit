@@ -58,6 +58,16 @@ export class ToneBufferSource extends OneShotSource<ToneBufferSourceOptions> {
 	private _sourceStopped = false;
 
 	/**
+	 * The time at which the source was started, or -1 if it has not been started
+	 */
+	private _sourceStartTime = -1;
+
+	/**
+	 * The offset into the buffer at which the source was started
+	 */
+	private _sourceStartOffset = 0;
+
+	/**
 	 * @param url The buffer to play or url to load
 	 * @param onload The callback to invoke when the buffer is done playing.
 	 */
@@ -195,6 +205,8 @@ export class ToneBufferSource extends OneShotSource<ToneBufferSourceOptions> {
 			this.toSeconds(this.loopEnd) || this.buffer.duration;
 		if (LT(computedOffset, this.buffer.duration)) {
 			this._sourceStarted = true;
+			this._sourceStartTime = computedTime;
+			this._sourceStartOffset = computedOffset;
 			this._source.start(computedTime, computedOffset);
 		}
 
@@ -245,6 +257,37 @@ export class ToneBufferSource extends OneShotSource<ToneBufferSourceOptions> {
 	}
 	set buffer(buffer: ToneAudioBuffer) {
 		this._buffer.set(buffer);
+	}
+
+	/**
+	 * The time at which the source is scheduled to stop,
+	 * or -1 if no stop time has been scheduled.
+	 */
+	get stopTime(): Seconds {
+		return this._stopTime;
+	}
+
+	/**
+	 * Get the playback position within the buffer at the given time.
+	 * Takes the playbackRate and (when looping) the loop points into account.
+	 * @param time The time at which to compute the playback position.
+	 */
+	getPlaybackPositionAtTime(time: Seconds): Seconds {
+		const computedTime = this.toSeconds(time);
+		const playbackRate = this.playbackRate.getValueAtTime(computedTime);
+		let position =
+			this._sourceStartOffset +
+			(computedTime - this._sourceStartTime) * playbackRate;
+		if (this.loop) {
+			const loopStart = this.toSeconds(this.loopStart);
+			const loopEnd =
+				this.toSeconds(this.loopEnd) || this.buffer.duration;
+			const loopDuration = loopEnd - loopStart;
+			if (loopDuration > 0 && position >= loopEnd) {
+				position = ((position - loopStart) % loopDuration) + loopStart;
+			}
+		}
+		return position;
 	}
 
 	/**

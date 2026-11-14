@@ -1,8 +1,12 @@
 import { BasicTests } from "../../../test/helper/Basic.js";
 import { GrainPlayer } from "./GrainPlayer.js";
-import { Offline, whenBetween } from "../../../test/helper/Offline.js";
+import { Player } from "./Player.js";
+import { atTime, Offline, whenBetween } from "../../../test/helper/Offline.js";
 import { SourceTests } from "../../../test/helper/SourceTests.js";
+import { TestAudioBuffer } from "../../../test/helper/compare/index.js";
 import { ToneAudioBuffer } from "../../core/context/ToneAudioBuffer.js";
+import { Merge } from "../../component/channel/Merge.js";
+import { getContext } from "../../core/Global.js";
 import { CompareToFile } from "../../../test/helper/CompareToFile.js";
 import { expect } from "chai";
 
@@ -230,6 +234,196 @@ describe("GrainPlayer", () => {
 			player.playbackRate = 0.5;
 			expect(player.playbackRate).to.equal(0.5);
 			player.dispose();
+		});
+	});
+
+	context("Switching buffers", () => {
+		/**
+		 * Make a 0.4 second buffer filled with a constant value
+		 */
+		function makeFlatBuffer(value: number): ToneAudioBuffer {
+			const samples = new Float32Array(
+				Math.floor(getContext().sampleRate * 0.4)
+			);
+			samples.fill(value);
+			return ToneAudioBuffer.fromArray(samples);
+		}
+
+		/**
+		 * Return the peak (max absolute) sample value of the given
+		 * channel between two times
+		 */
+		function getPeakBetween(
+			buff: TestAudioBuffer,
+			start: number,
+			stop: number,
+			channel = 0
+		): number {
+			const data = buff.toArray()[channel];
+			const startSample = Math.floor(start * buff.sampleRate);
+			const stopSample = Math.min(
+				Math.floor(stop * buff.sampleRate),
+				data.length
+			);
+			let peak = 0;
+			for (let i = startSample; i < stopSample; i++) {
+				peak = Math.max(peak, Math.abs(data[i]));
+			}
+			return peak;
+		}
+
+		function makeGrainPlayer(url: ToneAudioBuffer): GrainPlayer {
+			return new GrainPlayer({
+				grainSize: 0.4,
+				loop: true,
+				overlap: 0.01,
+				playbackRate: 1,
+				url,
+			});
+		}
+
+		it("plays the loaded buffer when nothing is switched", () => {
+			return Offline(() => {
+				const shared = makeFlatBuffer(0.8);
+				makeGrainPlayer(shared).toDestination().start(0);
+			}, 0.5).then((buff) => {
+				expect(getPeakBetween(buff, 0.02, 0.08)).to.be.within(
+					0.75,
+					0.85
+				);
+				expect(getPeakBetween(buff, 0.2, 0.35)).to.be.within(
+					0.75,
+					0.85
+				);
+			});
+		});
+
+		it("switching the buffer takes effect even in the middle of a grain", () => {
+			return Offline(() => {
+				const shared = makeFlatBuffer(0.8);
+				const replacement = makeFlatBuffer(0.25);
+				const grainPlayer = makeGrainPlayer(shared).toDestination();
+				grainPlayer.start(0);
+				// at 0.1 switch to the second buffer, in the middle of the first grain
+				return atTime(0.1, () => {
+					grainPlayer.buffer = replacement;
+				});
+			}, 0.5).then((buff) => {
+				expect(getPeakBetween(buff, 0.02, 0.08)).to.be.within(
+					0.75,
+					0.85
+				);
+				expect(getPeakBetween(buff, 0.2, 0.35)).to.be.within(0.2, 0.3);
+			});
+		});
+
+		it("switching one of two GrainPlayers sharing a buffer does not affect the other", () => {
+			return Offline(
+				() => {
+					const shared = makeFlatBuffer(0.8);
+					const replacement = makeFlatBuffer(0.25);
+					const merge = new Merge(2).toDestination();
+					const grainPlayer1 = makeGrainPlayer(shared);
+					const grainPlayer2 = makeGrainPlayer(shared);
+					grainPlayer1.connect(merge, 0, 0);
+					grainPlayer2.connect(merge, 0, 1);
+					grainPlayer1.start(0);
+					grainPlayer2.start(0);
+					// at 0.1 switch only the first player to the second buffer
+					return atTime(0.1, () => {
+						grainPlayer1.buffer = replacement;
+					});
+				},
+				0.5,
+				2
+			).then((buff) => {
+				// the first player plays the second buffer after the switch
+				expect(getPeakBetween(buff, 0.2, 0.35, 0)).to.be.within(
+					0.2,
+					0.3
+				);
+				// while the second player still plays the first buffer
+				expect(getPeakBetween(buff, 0.2, 0.35, 1)).to.be.within(
+					0.75,
+					0.85
+				);
+			});
+		});
+
+		it("switching a GrainPlayer's buffer does not affect a Player sharing the same buffer", () => {
+			return Offline(
+				() => {
+					const shared = makeFlatBuffer(0.8);
+					const replacement = makeFlatBuffer(0.25);
+					const merge = new Merge(2).toDestination();
+					const player = new Player({
+						fadeIn: 0,
+						fadeOut: 0,
+						loop: true,
+						url: shared,
+					});
+					const grainPlayer = makeGrainPlayer(shared);
+					player.connect(merge, 0, 0);
+					grainPlayer.connect(merge, 0, 1);
+					player.start(0);
+					grainPlayer.start(0);
+					// at 0.1 switch only the grain player to the second buffer
+					return atTime(0.1, () => {
+						grainPlayer.buffer = replacement;
+					});
+				},
+				0.5,
+				2
+			).then((buff) => {
+				// the plain player still plays the first buffer
+				expect(getPeakBetween(buff, 0.32, 0.45, 0)).to.be.within(
+					0.75,
+					0.85
+				);
+				// the grain player plays the second buffer after the switch
+				expect(getPeakBetween(buff, 0.2, 0.35, 1)).to.be.within(
+					0.2,
+					0.3
+				);
+			});
+		});
+
+		it("switching a Player's buffer does not affect a GrainPlayer sharing the same buffer", () => {
+			return Offline(
+				() => {
+					const shared = makeFlatBuffer(0.8);
+					const replacement = makeFlatBuffer(0.25);
+					const merge = new Merge(2).toDestination();
+					const player = new Player({
+						fadeIn: 0,
+						fadeOut: 0,
+						loop: true,
+						url: shared,
+					});
+					const grainPlayer = makeGrainPlayer(shared);
+					player.connect(merge, 0, 0);
+					grainPlayer.connect(merge, 0, 1);
+					player.start(0);
+					grainPlayer.start(0);
+					// at 0.2 switch only the plain player to the second buffer
+					return atTime(0.2, () => {
+						player.buffer = replacement;
+					});
+				},
+				0.5,
+				2
+			).then((buff) => {
+				// the plain player plays the second buffer after the switch
+				expect(getPeakBetween(buff, 0.32, 0.45, 0)).to.be.within(
+					0.2,
+					0.3
+				);
+				// while the grain player still plays the first buffer
+				expect(getPeakBetween(buff, 0.2, 0.35, 1)).to.be.within(
+					0.75,
+					0.85
+				);
+			});
 		});
 	});
 });
